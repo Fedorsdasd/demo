@@ -1,3 +1,5 @@
+папка admin
+
 <?php
 require_once '../config.php';
 requireAdmin();
