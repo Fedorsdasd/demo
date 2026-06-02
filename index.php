@@ -1,104 +1,226 @@
 <?php
-require_once 'config.php';
-$pageTitle = 'Каталог курсов';
-$filter = $_GET['type'] ?? '';
+require_once '../config.php';
+requireAdmin();
+
 $db = getDB();
-$sql = 'SELECT * FROM courses';
+
+$filterStatus = $_GET['status'] ?? '';
+$filterSearch = $_GET['search'] ?? '';
+$sortField    = in_array($_GET['sort'] ?? '', ['id','full_name','course_title','start_date','status','created_at']) ? $_GET['sort'] : 'created_at';
+$sortDir      = ($_GET['dir'] ?? 'desc') === 'asc' ? 'asc' : 'desc';
+$perPage      = 10;
+$page         = max(1, (int)($_GET['page'] ?? 1));
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['status'], $_POST['app_id'])) {
+    $validStatuses = ['new', 'in_progress', 'completed'];
+    $newStatus     = $_POST['status'];
+    $appId         = (int)$_POST['app_id'];
+    if (in_array($newStatus, $validStatuses)) {
+        $stmt = $db->prepare('UPDATE applications SET status = ? WHERE id = ?');
+        $stmt->execute([$newStatus, $appId]);
+    }
+    $params = array_filter(['status' => $filterStatus, 'search' => $filterSearch, 'sort' => $sortField, 'dir' => $sortDir, 'page' => $page, 'updated' => $appId]);
+    header('Location: ' . BASE_URL . '/admin/index.php?' . http_build_query($params));
+    exit;
+}
+
+$where  = [];
 $params = [];
-if ($filter) { $sql .= ' WHERE type = ?'; $params[] = $filter; }
-$sql .= ' ORDER BY id';
-$stmt = $db->prepare($sql);
+if ($filterStatus) { $where[] = 'a.status = ?'; $params[] = $filterStatus; }
+if ($filterSearch) {
+    $where[]  = '(u.full_name LIKE ? OR u.login LIKE ? OR c.title LIKE ?)';
+    $like      = '%' . $filterSearch . '%';
+    $params   = array_merge($params, [$like, $like, $like]);
+}
+$whereSQL = $where ? 'WHERE ' . implode(' AND ', $where) : '';
+
+$countStmt = $db->prepare("SELECT COUNT(*) FROM applications a JOIN users u ON a.user_id = u.id JOIN courses c ON a.course_id = c.id $whereSQL");
+$countStmt->execute($params);
+$total      = (int)$countStmt->fetchColumn();
+$totalPages = (int)ceil($total / $perPage);
+$page       = min($page, max(1, $totalPages));
+$offset     = ($page - 1) * $perPage;
+
+$stmt = $db->prepare("
+    SELECT a.id, a.start_date, a.payment_method, a.status, a.created_at,
+           u.full_name, u.phone, u.email, u.login,
+           c.title AS course_title, c.type AS course_type
+    FROM applications a
+    JOIN users u ON a.user_id = u.id
+    JOIN courses c ON a.course_id = c.id
+    $whereSQL
+    ORDER BY $sortField $sortDir
+    LIMIT $perPage OFFSET $offset
+");
 $stmt->execute($params);
-$courses = $stmt->fetchAll();
-$typeLabels = ['qualification' => 'Повышение квалификации', 'retraining' => 'Переподготовка', 'labor_safety' => 'Охрана труда'];
-include 'header.php';
+$applications = $stmt->fetchAll();
+
+$stats   = $db->query("SELECT status, COUNT(*) as cnt FROM applications GROUP BY status")->fetchAll();
+$statMap = array_column($stats, 'cnt', 'status');
+
+$statusLabels = [
+    'new'         => ['label' => 'Новая',              'badge' => 'badge-new'],
+    'in_progress' => ['label' => 'Идёт обучение',      'badge' => 'badge-in_progress'],
+    'completed'   => ['label' => 'Обучение завершено', 'badge' => 'badge-completed'],
+];
+$paymentLabels = ['card' => '💳 Карта', 'cash' => '💵 Наличные', 'invoice' => '🧾 Счёт'];
+
+function sortLink(string $field, string $label, string $current, string $dir): string {
+    $newDir = ($field === $current && $dir === 'asc') ? 'desc' : 'asc';
+    $arrow  = $field === $current ? ($dir === 'asc' ? ' ▲' : ' ▼') : '';
+    $p = array_merge($_GET, ['sort' => $field, 'dir' => $newDir, 'page' => 1]);
+    return '<a href="?' . http_build_query($p) . '" style="color:inherit;text-decoration:none;">' . htmlspecialchars($label) . $arrow . '</a>';
+}
 ?>
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Панель администратора | Учусь.РФ</title>
+  <link rel="stylesheet" href="/uchis-rf/css/style.css">
+  <style>
+    body { background: #0f172a; }
+    .admin-table th { color: #94a3b8; }
+    .admin-table td { color: #e2e8f0; border-bottom-color: #334155; }
+    .admin-table tr:hover td { background: #1e293b; }
+    .admin-table { background: #1e293b; }
+    .stat-card { background: #1e293b; border-radius: 12px; padding: 18px; text-align: center; border: 1px solid #334155; }
+    .stat-card .num { font-family: 'Unbounded',sans-serif; font-size: 1.8rem; color: #fff; }
+    .stat-card .lbl { color: #94a3b8; font-size: .82rem; margin-top: 4px; }
+    .status-select { background: #0f172a; border: 1px solid #475569; color: #e2e8f0; border-radius: 6px; padding: 5px 8px; font-size: .82rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+<div class="admin-panel">
+  <aside class="admin-sidebar">
+    <div class="admin-logo">Учусь.<span>РФ</span><br><small style="font-weight:400;color:#64748b;font-family:sans-serif;">Администратор</small></div>
+    <nav class="admin-nav">
+      <a href="/uchis-rf/admin/index.php" class="active">📋 Заявки</a>
+      <a href="/uchis-rf/index.php" target="_blank">🌐 Сайт</a>
+      <a href="/uchis-rf/logout.php" onclick="return confirm('Выйти?')">🚪 Выйти</a>
+    </nav>
+    <div style="margin-top:auto;padding:16px 20px;border-top:1px solid #334155;">
+      <div style="color:#64748b;font-size:.78rem;">Вошли как</div>
+      <div style="color:#e2e8f0;font-weight:600;"><?= h($_SESSION['admin_login'] ?? 'Admin') ?></div>
+    </div>
+  </aside>
 
-<section class="hero">
-  <div class="hero-bg">
-    <div class="hero-blob1"></div>
-    <div class="hero-blob2"></div>
-    <div class="hero-blob3"></div>
-  </div>
-  <div class="container">
-    <div class="hero-content">
-      <div class="hero-tag fade-up">🎓 Онлайн-обучение с документом гос. образца</div>
-      <h1 class="fade-up fade-up-1">Получите<br><em>новую профессию</em><br>не выходя из дома</h1>
-      <p class="fade-up fade-up-2">Курсы повышения квалификации, переподготовки и охраны труда. Государственный документ по итогам обучения.</p>
-      <div class="hero-btns fade-up fade-up-3">
-        <?php if (isLoggedIn()): ?>
-          <a href="/uchis-rf/apply.php" class="btn btn-primary">Подать заявку</a>
-          <a href="/uchis-rf/cabinet.php" class="btn btn-outline">Личный кабинет</a>
-        <?php else: ?>
-          <a href="/uchis-rf/register.php" class="btn btn-primary">Начать бесплатно</a>
-          <a href="/uchis-rf/login.php" class="btn btn-outline">Войти</a>
-        <?php endif; ?>
+  <div class="admin-main">
+    <div class="admin-topbar">
+      <h1>📋 Управление заявками</h1>
+      <div style="color:#94a3b8;font-size:.88rem;"><?= date('d.m.Y H:i') ?></div>
+    </div>
+
+    <?php if (isset($_GET['updated'])): ?>
+      <div class="alert alert-success" style="margin-bottom:20px;">✅ Статус заявки #<?= (int)$_GET['updated'] ?> обновлён.</div>
+    <?php endif; ?>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:14px;margin-bottom:20px;">
+      <div class="stat-card"><div class="num"><?= $total ?></div><div class="lbl">Всего</div></div>
+      <div class="stat-card"><div class="num" style="color:#60a5fa;"><?= $statMap['new'] ?? 0 ?></div><div class="lbl">Новых</div></div>
+      <div class="stat-card"><div class="num" style="color:#fbbf24;"><?= $statMap['in_progress'] ?? 0 ?></div><div class="lbl">В обучении</div></div>
+      <div class="stat-card"><div class="num" style="color:#34d399;"><?= $statMap['completed'] ?? 0 ?></div><div class="lbl">Завершено</div></div>
+    </div>
+
+    <div class="filters">
+      <div class="filter-group">
+        <label>Поиск</label>
+        <input type="text" id="filterSearch" placeholder="Имя, логин, курс..." value="<?= h($filterSearch) ?>" style="min-width:200px;">
       </div>
-      <div class="hero-stats fade-up">
-        <div class="hero-stat"><div class="hero-stat-num">6+</div><div class="hero-stat-lbl">Направлений</div></div>
-        <div class="hero-stat"><div class="hero-stat-num">100%</div><div class="hero-stat-lbl">Онлайн</div></div>
-        <div class="hero-stat"><div class="hero-stat-num">Гос.</div><div class="hero-stat-lbl">Документ</div></div>
+      <div class="filter-group">
+        <label>Статус</label>
+        <select id="filterStatus" onchange="applyFilter()">
+          <option value="">Все</option>
+          <option value="new"         <?= $filterStatus === 'new'         ? 'selected' : '' ?>>Новая</option>
+          <option value="in_progress" <?= $filterStatus === 'in_progress' ? 'selected' : '' ?>>Идёт обучение</option>
+          <option value="completed"   <?= $filterStatus === 'completed'   ? 'selected' : '' ?>>Завершено</option>
+        </select>
       </div>
+      <a href="/uchis-rf/admin/index.php" class="btn btn-sm" style="background:#334155;color:#e2e8f0;align-self:flex-end;">Сбросить</a>
     </div>
-  </div>
-</section>
 
-<section class="adv-section">
-  <div class="container">
-    <div class="adv-grid">
-      <div class="adv-card"><span class="adv-icon">🏆</span><div class="adv-title">Документы гос. образца</div><div class="adv-desc">Удостоверения и дипломы, признанные работодателями по всей России</div></div>
-      <div class="adv-card"><span class="adv-icon">💻</span><div class="adv-title">100% онлайн</div><div class="adv-desc">Учитесь в удобное время из любой точки мира без отрыва от работы</div></div>
-      <div class="adv-card"><span class="adv-icon">⚡</span><div class="adv-title">Быстрый старт</div><div class="adv-desc">Выберите удобную дату — занятия начнутся в течение нескольких дней</div></div>
-      <div class="adv-card"><span class="adv-icon">🔒</span><div class="adv-title">Лицензия Минобрнауки</div><div class="adv-desc">Официально лицензированная организация с многолетним опытом</div></div>
+    <div class="table-wrap">
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th><?= sortLink('id', '#', $sortField, $sortDir) ?></th>
+            <th><?= sortLink('full_name', 'Пользователь', $sortField, $sortDir) ?></th>
+            <th><?= sortLink('course_title', 'Курс', $sortField, $sortDir) ?></th>
+            <th><?= sortLink('start_date', 'Дата начала', $sortField, $sortDir) ?></th>
+            <th>Оплата</th>
+            <th><?= sortLink('created_at', 'Создана', $sortField, $sortDir) ?></th>
+            <th><?= sortLink('status', 'Статус', $sortField, $sortDir) ?></th>
+            <th>Действие</th>
+          </tr>
+        </thead>
+        <tbody>
+          <?php if (empty($applications)): ?>
+            <tr><td colspan="8" style="text-align:center;color:#64748b;padding:32px;">Заявок не найдено</td></tr>
+          <?php endif; ?>
+          <?php foreach ($applications as $app): ?>
+            <tr data-status="<?= h($app['status']) ?>">
+              <td style="color:#64748b;">#<?= $app['id'] ?></td>
+              <td>
+                <div style="font-weight:600;"><?= h($app['full_name']) ?></div>
+                <div style="color:#64748b;font-size:.78rem;"><?= h($app['login']) ?> · <?= h($app['phone']) ?></div>
+              </td>
+              <td style="font-size:.85rem;max-width:180px;"><?= h($app['course_title']) ?></td>
+              <td><?= date('d.m.Y', strtotime($app['start_date'])) ?></td>
+              <td><?= $paymentLabels[$app['payment_method']] ?? '' ?></td>
+              <td style="color:#64748b;font-size:.82rem;"><?= date('d.m.Y', strtotime($app['created_at'])) ?></td>
+              <td><span class="badge <?= $statusLabels[$app['status']]['badge'] ?>"><?= $statusLabels[$app['status']]['label'] ?></span></td>
+              <td>
+                <form method="post" onsubmit="event.preventDefault();confirmStatus(this);">
+                  <input type="hidden" name="app_id" value="<?= $app['id'] ?>">
+                  <select name="status" class="status-select">
+                    <option value="new"         <?= $app['status'] === 'new'         ? 'selected' : '' ?>>Новая</option>
+                    <option value="in_progress" <?= $app['status'] === 'in_progress' ? 'selected' : '' ?>>Идёт обучение</option>
+                    <option value="completed"   <?= $app['status'] === 'completed'   ? 'selected' : '' ?>>Завершено</option>
+                  </select>
+                  <button type="submit" class="btn btn-sm btn-primary" style="margin-left:6px;">✓</button>
+                </form>
+              </td>
+            </tr>
+          <?php endforeach; ?>
+        </tbody>
+      </table>
     </div>
-  </div>
-</section>
 
-<section class="section">
-  <div class="container">
-    <div class="section-header">
-      <div class="section-tag">Каталог</div>
-      <div class="section-title">Все курсы</div>
-      <div class="section-sub">Выберите направление и запишитесь онлайн за несколько минут</div>
-    </div>
-    <div class="filter-bar">
-      <span class="filter-label">Фильтр:</span>
-      <a href="/uchis-rf/index.php" class="btn btn-sm <?= !$filter ? 'btn-primary' : 'btn-filter' ?>">Все</a>
-      <?php foreach ($typeLabels as $key => $label): ?>
-        <a href="/uchis-rf/index.php?type=<?= $key ?>" class="btn btn-sm <?= $filter === $key ? 'btn-primary' : 'btn-filter' ?>"><?= $label ?></a>
-      <?php endforeach; ?>
-    </div>
-    <div class="courses-grid">
-      <?php foreach ($courses as $i => $course): ?>
-        <div class="course-card fade-up fade-up-<?= ($i % 3) + 1 ?>">
-          <span class="course-type type-<?= h($course['type']) ?>"><?= $typeLabels[$course['type']] ?? '' ?></span>
-          <div class="course-title"><?= h($course['title']) ?></div>
-          <div class="course-desc"><?= h($course['description']) ?></div>
-          <div class="course-footer">
-            <div class="course-meta">⏱ <?= h($course['duration']) ?></div>
-            <?php if (isLoggedIn()): ?>
-              <a href="/uchis-rf/apply.php?course_id=<?= $course['id'] ?>" class="btn btn-sm btn-primary">Записаться →</a>
-            <?php else: ?>
-              <a href="/uchis-rf/register.php" class="btn btn-sm btn-ghost">Войти</a>
-            <?php endif; ?>
-          </div>
-        </div>
-      <?php endforeach; ?>
-      <?php if (empty($courses)): ?><p style="color:var(--muted);grid-column:1/-1;">Курсы не найдены.</p><?php endif; ?>
-    </div>
-  </div>
-</section>
-
-<div class="cta-section">
-  <div style="position:relative;">
-    <h2>Готовы начать обучение?</h2>
-    <p>Зарегистрируйтесь, выберите курс и подайте заявку. Всё просто — мы свяжемся в течение дня.</p>
-    <?php if (!isLoggedIn()): ?>
-      <a href="/uchis-rf/register.php" class="btn btn-accent">Зарегистрироваться бесплатно</a>
-    <?php else: ?>
-      <a href="/uchis-rf/apply.php" class="btn btn-accent">Подать заявку</a>
+    <?php if ($totalPages > 1): ?>
+      <div class="pagination">
+        <?php
+        $base = array_filter(['status' => $filterStatus, 'search' => $filterSearch, 'sort' => $sortField, 'dir' => $sortDir]);
+        for ($p = 1; $p <= $totalPages; $p++):
+          $url = '?' . http_build_query(array_merge($base, ['page' => $p]));
+        ?>
+          <?php if ($p === $page): ?>
+            <span class="current"><?= $p ?></span>
+          <?php else: ?>
+            <a href="<?= h($url) ?>"><?= $p ?></a>
+          <?php endif; ?>
+        <?php endfor; ?>
+      </div>
     <?php endif; ?>
   </div>
 </div>
 
-<?php include 'footer.php'; ?>
+<script src="/uchis-rf/js/app.js"></script>
+<script>
+function applyFilter() {
+  const p = new URLSearchParams(window.location.search);
+  p.set('status', document.getElementById('filterStatus').value);
+  p.set('page', '1');
+  window.location.search = p.toString();
+}
+document.getElementById('filterSearch').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') {
+    const p = new URLSearchParams(window.location.search);
+    p.set('search', this.value);
+    p.set('page', '1');
+    window.location.search = p.toString();
+  }
+});
+</script>
+</body>
+</html>
