@@ -8,17 +8,16 @@ define('ADMIN_LOGIN', 'Admin26');
 define('ADMIN_PASSWORD', 'Demo20');
 define('BASE_URL', '/uchis-rf');
 
-function getDB(): PDO {
-    static $pdo = null;
-    if ($pdo === null) {
-        $dsn = 'mysql:host=' . DB_HOST . ';port=3307;dbname=' . DB_NAME . ';charset=' . DB_CHARSET;
-        $pdo = new PDO($dsn, DB_USER, DB_PASS, [
-            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES   => false,
-        ]);
+function getDB(): mysqli {
+    static $mysqli = null;
+    if ($mysqli === null) {
+        $mysqli = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME, 3307);
+        if ($mysqli->connect_error) {
+            die('Connect Error (' . $mysqli->connect_errno . ') ' . $mysqli->connect_error);
+        }
+        $mysqli->set_charset(DB_CHARSET);
     }
-    return $pdo;
+    return $mysqli;
 }
 
 if (session_status() === PHP_SESSION_NONE) {
